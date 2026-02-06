@@ -17,7 +17,9 @@ const messages = {
                 2: 'Golden-Below 0',
                 3: 'Death-Above 0',
                 4: 'Death-Below 0'
-            }
+            },
+            rsiNotSelected: 'Not selected',
+            rsiEscHint: 'Press ESC to cancel'
         },
         table: {
             symbol: 'Symbol',
@@ -77,7 +79,49 @@ const messages = {
         },
         stats: 'Found {count} records',
         noResults: 'No results match your criteria.',
-        loading: 'Loading Analysis...'
+        loading: 'Loading Analysis...',
+            user: {
+            notLoggedIn: 'Not logged in',
+            login: 'Login',
+            logout: 'Logout',
+            email: 'Email',
+            auth: 'Account'
+        },
+        auth: {
+            login: 'Login',
+            register: 'Register',
+            email: 'Email',
+            password: 'Password',
+            confirmPassword: 'Confirm Password',
+            passwordMismatch: 'Passwords do not match',
+            goLogin: 'Already have an account? Login',
+            goRegister: 'No account? Register',
+            loginSuccess: 'Login success',
+            registerSuccess: 'Register success',
+            pleaseLogin: 'Please login first',
+            networkError: 'Network error, please try again later',
+            errors: {
+                invalid_request: 'Please check your input format',
+                email_or_password_wrong: 'Incorrect email or password, please try again',
+                email_already_registered: 'This email is already registered, please login directly',
+                server_error: 'Service temporarily unavailable, please try again later'
+            },
+            tgBindBtn: 'Bind Telegram',
+            tgBindHint: 'Bind your Telegram to receive alerts. Click the button to get the link, then send /start in the bot.',
+            tgBindWaiting: 'Waiting for you to open Telegram and send /start...',
+            tgBound: 'Bound: {id}',
+            tgBindSuccess: 'Binding successful!',
+            openTelegram: 'Open Telegram Bot'
+        },
+        subscribe: {
+            success: 'Subscribed successfully',
+            pleaseLogin: 'Please login first to subscribe',
+            mySubs: 'My Subscriptions',
+            unsubscribe: 'Unsubscribe',
+            empty: 'No subscriptions yet',
+            selectCycle: 'Select cycle',
+            save: 'Save'
+        }
     },
     zh: {
         title: '加密货币分析仪表盘',
@@ -95,7 +139,9 @@ const messages = {
                 2: '金叉-0轴下',
                 3: '死叉-0轴上',
                 4: '死叉-0轴下'
-            }
+            },
+            rsiNotSelected: '未选择',
+            rsiEscHint: '按 ESC 取消选择'
         },
         table: {
             symbol: '币种',
@@ -155,7 +201,49 @@ const messages = {
         },
         stats: '共找到 {count} 条记录',
         noResults: '没有匹配的数据。',
-        loading: '正在加载分析数据...'
+        loading: '正在加载分析数据...',
+        user: {
+            notLoggedIn: '未登录',
+            login: '登录',
+            logout: '退出',
+            email: '邮箱',
+            auth: '账号'
+        },
+        auth: {
+            login: '登录',
+            register: '注册',
+            email: '邮箱',
+            password: '密码',
+            confirmPassword: '确认密码',
+            passwordMismatch: '两次输入的密码不一致',
+            goLogin: '已有账号？去登录',
+            goRegister: '没有账号？去注册',
+            loginSuccess: '登录成功',
+            registerSuccess: '注册成功',
+            pleaseLogin: '请先登录',
+            networkError: '网络异常，请稍后重试',
+            errors: {
+                invalid_request: '请检查输入格式是否正确',
+                email_or_password_wrong: '邮箱或密码错误，请重试',
+                email_already_registered: '该邮箱已注册，请直接登录',
+                server_error: '服务暂时不可用，请稍后重试'
+            },
+            tgBindBtn: '绑定 Telegram',
+            tgBindHint: '绑定 Telegram 后可接收提醒。点击按钮获取链接，在机器人里发送 /start。',
+            tgBindWaiting: '等待您在 Telegram 中打开机器人并发送 /start…',
+            tgBound: '已绑定: {id}',
+            tgBindSuccess: '绑定成功！',
+            openTelegram: '打开 Telegram 机器人'
+        },
+        subscribe: {
+            success: '订阅成功',
+            pleaseLogin: '请先登录后再订阅',
+            mySubs: '我的订阅',
+            unsubscribe: '取消订阅',
+            empty: '暂无订阅',
+            selectCycle: '请选择周期',
+            save: '保存'
+        }
     }
 }
 

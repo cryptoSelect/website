@@ -1,13 +1,52 @@
 <script setup>
-import { ref, onMounted, computed, watchEffect, onUnmounted } from 'vue'
+import { ref, onMounted, computed, watch, watchEffect, onUnmounted } from 'vue'
 import axios from './api'
+import { getToken, setToken, clearToken, login as apiLogin, register as apiRegister, getMe, createSubscription, deleteSubscription, listSubscriptions, tgBindStart, tgBindStatus } from './api'
 import { useI18n } from 'vue-i18n'
 
 const { t, locale } = useI18n()
 
+const AUTH_ERROR_KEYS = ['invalid_request', 'email_or_password_wrong', 'email_already_registered', 'server_error']
+function getAuthErrorMsg(err) {
+  if (!err) return ''
+  if (AUTH_ERROR_KEYS.includes(err)) return t('auth.errors.' + err)
+  return err
+}
+
 const toggleLang = () => {
   locale.value = locale.value === 'zh' ? 'en' : 'zh'
 }
+
+// 用户状态：未登录为 null，登录后为 { email, telegram_bound }
+const user = ref(null)
+const showLoginModal = ref(false)
+const loginEmail = ref('')
+const loginPassword = ref('')
+const loginPasswordConfirm = ref('')
+const authMode = ref('login') // 'login' | 'register'
+const loginError = ref('')
+const loginLoading = ref(false)
+// 点击订阅时若未登录，登录成功后要打开的订阅行
+const pendingSubscribeRow = ref(null)
+// Telegram 绑定（登录后在个人中心绑定）
+const bindTelegramId = ref('')
+const showTgBindPanel = ref(false)
+const tgBindToken = ref('')
+const tgBindStartUrl = ref('')
+const tgBindError = ref('')
+const showTgBindModal = ref(false)
+let tgBindPollingTimer = null
+// 订阅弹窗当前要订阅的 symbol 和周期（来自 moreMenuRow 或登录后待订阅）
+const subscribeSymbol = ref('')
+const subscribeCycles = ref([]) // 支持多选周期
+const initialSubscribedCycles = ref([]) // 打开弹窗时该 symbol 已订阅的周期，用于提交时计算增删
+const subscribeLoading = ref(false)
+const subscribeError = ref('')
+const subscribeSuccess = ref(false)
+// 当前用户订阅的 symbol 集合（用于更多菜单判断）
+const mySubscriptions = ref(new Set())
+const showMySubsModal = ref(false)
+const mySubsLoading = ref(false)
 
 // Data State
 const symbols = ref([])
@@ -29,6 +68,36 @@ const fundsError = ref(null)
 const moreMenuOpen = ref(null)   // 当前打开的行 id，null 表示关闭
 const moreMenuRow = ref(null)    // 当前行数据，用于「查看更多」
 const moreMenuPos = ref({ top: 0, left: 0 })
+
+// RSI 选择器：10-90，步长 5，上下滚动，ESC 取消选择
+const rsiSliderOpen = ref(false)
+const RSI_OPTIONS = [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
+
+// 订阅时可选的周期列表（与后端 IndicatorTask 配置一致）
+const AVAILABLE_CYCLES = ['5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
+// 订阅弹窗的周期选项：预设列表 + 若已选周期不在列表中则补充显示
+const subscribeCycleOptions = computed(() => {
+  const selected = subscribeCycles.value || []
+  const extra = selected.filter(c => c?.trim() && !AVAILABLE_CYCLES.includes(c))
+  if (extra.length) return [...new Set([...extra, ...AVAILABLE_CYCLES])]
+  return AVAILABLE_CYCLES
+})
+
+function toggleSubscribeCycle(c) {
+  const arr = [...(subscribeCycles.value || [])]
+  const i = arr.indexOf(c)
+  if (i >= 0) arr.splice(i, 1)
+  else arr.push(c)
+  subscribeCycles.value = arr
+}
+
+const hasSubscribeChanges = computed(() => {
+  const cycles = subscribeCycles.value || []
+  const initial = initialSubscribedCycles.value || []
+  const toAdd = cycles.filter((c) => !initial.includes(c))
+  const toRemove = initial.filter((c) => !cycles.includes(c))
+  return toAdd.length > 0 || toRemove.length > 0
+})
 
 // Filters
 const filterSymbol = ref('')
@@ -98,28 +167,312 @@ const resetFilters = () => {
   fetchData()
 }
 
+const restoreUser = async () => {
+  if (!getToken()) return
+  try {
+    const res = await getMe()
+    if (res.code === 200 && res.data) {
+      user.value = { email: res.data.email, telegram_bound: !!res.data.telegram_bound }
+      fetchMySubscriptions()
+    } else {
+      clearToken()
+    }
+  } catch {
+    clearToken()
+  }
+}
+
+const doLogin = async () => {
+  loginError.value = ''
+  loginLoading.value = true
+  try {
+    const res = await apiLogin(loginEmail.value.trim(), loginPassword.value)
+    if (res.code === 200 && res.data) {
+      setToken(res.data.token)
+      user.value = { email: res.data.email, telegram_bound: !!res.data.telegram_bound }
+      showLoginModal.value = false
+      loginEmail.value = ''
+      loginPassword.value = ''
+      fetchMySubscriptions()
+      if (pendingSubscribeRow.value) {
+        subscribeSymbol.value = pendingSubscribeRow.value.symbol || ''
+        const cy = pendingSubscribeRow.value.cycle?.trim()
+        subscribeCycles.value = cy ? [cy] : []
+        showSubscribeModal.value = true
+        pendingSubscribeRow.value = null
+      }
+    } else {
+      loginError.value = getAuthErrorMsg(res.error) || t('auth.pleaseLogin')
+    }
+  } catch (e) {
+    loginError.value = e.response?.data?.error ? getAuthErrorMsg(e.response.data.error) : t('auth.networkError')
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+function openMySubs() {
+  if (user.value) {
+    showMySubsModal.value = true
+    fetchMySubscriptions()
+  } else {
+    showLoginModal.value = true
+  }
+}
+
+function openLoginModal(mode) {
+  authMode.value = mode || 'login'
+  loginError.value = ''
+  loginPasswordConfirm.value = ''
+  showLoginModal.value = true
+}
+
+const doRegister = async () => {
+  if (loginPassword.value !== loginPasswordConfirm.value) {
+    loginError.value = t('auth.passwordMismatch')
+    return
+  }
+  loginError.value = ''
+  loginLoading.value = true
+  try {
+    const res = await apiRegister(loginEmail.value.trim(), loginPassword.value)
+    if (res.code === 200 && res.data) {
+      setToken(res.data.token)
+      user.value = { email: res.data.email, telegram_bound: false }
+      showLoginModal.value = false
+      loginEmail.value = ''
+      loginPassword.value = ''
+      fetchMySubscriptions()
+      if (pendingSubscribeRow.value) {
+        const r = pendingSubscribeRow.value
+        pendingSubscribeRow.value = null
+        openSubscribeModalForSymbol(r.symbol)
+      }
+    } else {
+      loginError.value = getAuthErrorMsg(res.error) || t('auth.pleaseLogin')
+    }
+  } catch (e) {
+    loginError.value = e.response?.data?.error ? getAuthErrorMsg(e.response.data.error) : t('auth.networkError')
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+function stopTgBindPolling() {
+  if (tgBindPollingTimer) {
+    clearInterval(tgBindPollingTimer)
+    tgBindPollingTimer = null
+  }
+}
+
+function resetTgBindState() {
+  stopTgBindPolling()
+  bindTelegramId.value = ''
+  showTgBindPanel.value = false
+  tgBindToken.value = ''
+  tgBindStartUrl.value = ''
+  tgBindError.value = ''
+}
+
+function onTgBindSuccess() {
+  if (user.value) user.value = { ...user.value, telegram_bound: true }
+  setTimeout(() => {
+    resetTgBindState()
+    showTgBindModal.value = false
+  }, 1500)
+}
+
+const startTgBind = async () => {
+  tgBindError.value = ''
+  try {
+    const res = await tgBindStart()
+    if (res.code !== 200 || !res.data) {
+      tgBindError.value = res.error || 'Failed'
+      return
+    }
+    tgBindToken.value = res.data.token
+    tgBindStartUrl.value = res.data.start_url || ''
+    showTgBindPanel.value = true
+    stopTgBindPolling()
+    tgBindPollingTimer = setInterval(async () => {
+      if (!tgBindToken.value) return
+      try {
+        const st = await tgBindStatus(tgBindToken.value)
+        if (st.code === 200 && st.data?.bound && st.data.telegram_id) {
+          bindTelegramId.value = st.data.telegram_id
+          stopTgBindPolling()
+          showTgBindPanel.value = false
+          onTgBindSuccess()
+        }
+      } catch (_) {}
+    }, 2000)
+  } catch (e) {
+    tgBindError.value = e.response?.data?.error || 'Network error'
+  }
+}
+
+const doLogout = () => {
+  clearToken()
+  user.value = null
+  mySubscriptions.value = new Set()
+}
+
+function subKey(symbol, cycle) {
+  return `${String(symbol || '').toUpperCase()}|${String(cycle || '').trim()}`
+}
+
+async function fetchMySubscriptions() {
+  if (!getToken()) return
+  mySubsLoading.value = true
+  try {
+    const res = await listSubscriptions()
+    if (res.code === 200 && Array.isArray(res.data?.data)) {
+      mySubscriptions.value = new Set(res.data.data.map(x => subKey(x.symbol, x.cycle)))
+    } else {
+      mySubscriptions.value = new Set()
+    }
+  } catch {
+    mySubscriptions.value = new Set()
+  } finally {
+    mySubsLoading.value = false
+  }
+}
+
+function isSubscribed(symbol, cycle) {
+  if (!symbol || !cycle) return false
+  return mySubscriptions.value.has(subKey(symbol, cycle))
+}
+
+async function openSubscribeModalForSymbol(symbol) {
+  if (!symbol?.trim()) return
+  subscribeSymbol.value = symbol.trim()
+  subscribeError.value = ''
+  subscribeSuccess.value = false
+  subscribeCycles.value = []
+  initialSubscribedCycles.value = []
+  showSubscribeModal.value = true
+  try {
+    const res = await listSubscriptions(symbol)
+    if (res.code === 200 && res.data?.data) {
+      const cycles = res.data.data.map((x) => x.cycle).filter(Boolean)
+      subscribeCycles.value = [...cycles]
+      initialSubscribedCycles.value = [...cycles]
+    }
+  } catch (_) {
+    subscribeCycles.value = []
+    initialSubscribedCycles.value = []
+  }
+}
+
+const handleSubscribe = (row) => {
+  const r = row || moreMenuRow.value
+  const symbol = r?.symbol
+  if (!symbol) return
+  if (!user.value) {
+    pendingSubscribeRow.value = r
+    showLoginModal.value = true
+    return
+  }
+  moreMenuOpen.value = null
+  moreMenuRow.value = null
+  openSubscribeModalForSymbol(symbol)
+}
+
+const doUnsubscribe = async (symbol, cycle) => {
+  if (!symbol?.trim() || !cycle?.trim() || !user.value) return
+  subscribeLoading.value = true
+  try {
+    const res = await deleteSubscription(symbol.trim().toUpperCase(), cycle.trim())
+    if (res.code === 200) {
+      mySubscriptions.value = new Set([...mySubscriptions.value].filter(k => k !== subKey(symbol, cycle)))
+    }
+  } catch (_) {}
+  finally {
+    subscribeLoading.value = false
+  }
+}
+
+const doSubscribeSubmit = async () => {
+  const symbol = subscribeSymbol.value?.trim()
+  const cycles = (subscribeCycles.value || []).map(c => c?.trim()).filter(Boolean)
+  const initial = initialSubscribedCycles.value || []
+  if (!symbol || !user.value) return
+  subscribeError.value = ''
+  subscribeSuccess.value = false
+  subscribeLoading.value = true
+  try {
+    const toAdd = cycles.filter((c) => !initial.includes(c))
+    const toRemove = initial.filter((c) => !cycles.includes(c))
+    let ok = true
+    for (const cy of toRemove) {
+      const res = await deleteSubscription(symbol.toUpperCase(), cy)
+      if (res.code === 200) {
+        mySubscriptions.value = new Set([...mySubscriptions.value].filter((k) => k !== subKey(symbol, cy)))
+      } else {
+        ok = false
+        subscribeError.value = res.error || 'Failed'
+        break
+      }
+    }
+    if (ok && toAdd.length > 0) {
+      const res = await createSubscription(symbol.toUpperCase(), toAdd)
+      if (res.code === 200) {
+        toAdd.forEach((cy) => {
+          mySubscriptions.value = new Set([...mySubscriptions.value, subKey(symbol, cy)])
+        })
+      } else {
+        ok = false
+        subscribeError.value = res.error || 'Failed'
+      }
+    }
+    if (ok) {
+      subscribeSuccess.value = true
+      initialSubscribedCycles.value = [...cycles]
+    }
+  } catch (e) {
+    subscribeError.value = e.response?.data?.error || 'Network error'
+  } finally {
+    subscribeLoading.value = false
+  }
+}
+
 onMounted(() => {
+  restoreUser()
   fetchData()
-  window.addEventListener('click', () => {
+  window.addEventListener('click', (e) => {
+    if (e.target.closest?.('.more-popup')) return
     moreMenuOpen.value = null
     moreMenuRow.value = null
+    rsiSliderOpen.value = false
   })
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       showModal.value = false
       showSubscribeModal.value = false
+      showLoginModal.value = false
+      showTgBindModal.value = false
+      showMySubsModal.value = false
       moreMenuOpen.value = null
+      if (rsiSliderOpen.value) {
+        rsiSliderOpen.value = false
+        filterRsi.value = ''
+      }
     }
   })
 })
 
+watch(showTgBindModal, (v) => {
+  if (!v) resetTgBindState()
+})
+
 watchEffect(() => {
-  const isModalOpen = showModal.value || showSubscribeModal.value
+  const isModalOpen = showModal.value || showSubscribeModal.value || showLoginModal.value || showTgBindModal.value
   document.body.classList.toggle('modal-open', isModalOpen)
 })
 
 onUnmounted(() => {
   document.body.classList.remove('modal-open')
+  stopTgBindPolling()
 })
 
 const copyToClipboard = async (text) => {
@@ -400,11 +753,6 @@ const fetchFundsData = async (symbol) => {
   }
 }
 
-const handleSubscribe = () => {
-  showSubscribeModal.value = true
-  moreMenuOpen.value = null
-}
-
 function openMoreMenu(row, ev) {
   ev.stopPropagation()
   if (moreMenuOpen.value === row.id) {
@@ -429,13 +777,25 @@ function openMoreMenu(row, ev) {
     <header class="main-header">
       <div class="header-content">
         <h1>{{ t('title') }}</h1>
-        <button class="lang-toggle" @click="toggleLang">
-          {{ locale === 'zh' ? 'English' : '中文' }}
-        </button>
+        <div class="header-right">
+          <button class="lang-toggle" @click="toggleLang">
+            {{ locale === 'zh' ? 'English' : '中文' }}
+          </button>
+          <div class="user-info-wrap">
+            <template v-if="user">
+              <span class="user-email">{{ user.email }}</span>
+              <button v-if="!user.telegram_bound" type="button" class="tg-bind-btn" @click="showTgBindModal = true; resetTgBindState()">{{ t('auth.tgBindBtn') }}</button>
+              <button type="button" class="user-logout" @click="doLogout">{{ t('user.logout') }}</button>
+            </template>
+            <template v-else>
+              <button type="button" class="user-login-btn" @click="openLoginModal('login')">{{ t('user.login') }}</button>
+            </template>
+          </div>
+        </div>
       </div>
     </header>
 
-    <section class="glass-card filter-section">
+    <section class="glass-card filter-section" :class="{ 'dropdown-open': rsiSliderOpen }">
       <div class="input-group">
         <label>{{ t('filters.symbol') }}</label>
         <input v-model="filterSymbol" placeholder="e.g. BTCUSDT" @keyup.enter="fetchData" />
@@ -464,9 +824,37 @@ function openMoreMenu(row, ev) {
         </select>
       </div>
 
-      <div class="input-group">
+      <div class="input-group rsi-select-group" @click.stop>
         <label>{{ t('filters.rsi') }}</label>
-        <input v-model="filterRsi" type="number" placeholder="Value (e.g. 70)" />
+        <div class="rsi-selector" :class="{ open: rsiSliderOpen }">
+          <div
+            class="rsi-trigger"
+            @click="rsiSliderOpen = !rsiSliderOpen"
+          >
+            <span v-if="filterRsi">{{ filterRsi }}</span>
+            <span v-else class="rsi-placeholder">{{ t('filters.rsiNotSelected') }}</span>
+          </div>
+          <div v-show="rsiSliderOpen" class="rsi-dropdown-wrap">
+            <div class="rsi-dropdown">
+              <div
+                class="rsi-option"
+                :class="{ active: !filterRsi }"
+                @click="filterRsi = ''; rsiSliderOpen = false"
+              >
+                {{ t('filters.all') }}
+              </div>
+              <div
+                v-for="v in RSI_OPTIONS"
+                :key="v"
+                class="rsi-option"
+                :class="{ active: filterRsi === String(v) }"
+                @click="filterRsi = String(v); rsiSliderOpen = false"
+              >
+                {{ v }}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="input-group">
@@ -483,6 +871,7 @@ function openMoreMenu(row, ev) {
       <div class="btn-group">
         <button class="primary-btn" @click="fetchData">{{ t('filters.search') }}</button>
         <button class="primary-btn reset-btn" @click="resetFilters">{{ t('filters.reset') }}</button>
+        <button class="primary-btn" @click="openMySubs">{{ t('subscribe.mySubs') }}</button>
       </div>
     </section>
 
@@ -696,26 +1085,151 @@ function openMoreMenu(row, ev) {
         </div>
       </div>
 
-      <!-- Subscribe Modal -->
-      <div v-if="showSubscribeModal" class="modal-overlay" @click="showSubscribeModal = false">
+      <!-- Login Modal -->
+      <div v-if="showLoginModal" class="modal-overlay">
         <div class="modal-content glass-card animated-modal" @click.stop>
           <div class="modal-header">
-            <h2>{{ t('table.subscribe') }}</h2>
-            <button class="close-btn" @click="showSubscribeModal = false">&times;</button>
+            <h2>{{ authMode === 'register' ? t('auth.register') : t('user.auth') }}</h2>
+            <button class="close-btn" @click="showLoginModal = false">&times;</button>
           </div>
-          <div class="modal-body text-center" style="padding: 2rem 0;">
-            <div class="coming-soon-icon">🚀</div>
-            <p style="font-size: 1.1rem; color: var(--text-muted); margin-top: 1rem;">
-              {{ t('table.notImplemented') }}
-            </p>
-            <div class="modal-footer">
-              <button class="primary-btn" style="width: 100%; margin-top: 2rem;" @click="showSubscribeModal = false">{{ t('table.close') }}</button>
+          <div class="modal-body" style="padding: 1.5rem 0;">
+            <div class="auth-form">
+              <div class="input-group">
+                <label>{{ t('auth.email') }}</label>
+                <input v-model="loginEmail" type="email" :placeholder="t('auth.email')" />
+              </div>
+              <div class="input-group">
+                <label>{{ t('auth.password') }}</label>
+                <input v-model="loginPassword" type="password" :placeholder="t('auth.password')" />
+              </div>
+              <template v-if="authMode === 'register'">
+                <div class="input-group">
+                  <label>{{ t('auth.confirmPassword') }}</label>
+                  <input v-model="loginPasswordConfirm" type="password" :placeholder="t('auth.confirmPassword')" />
+                </div>
+              </template>
+              <p v-if="loginError" class="text-danger" style="margin-top: 0.5rem; font-size: 0.9rem;">{{ loginError }}</p>
+              <div class="auth-actions">
+                <template v-if="authMode === 'login'">
+                  <button class="primary-btn" :disabled="loginLoading" @click="doLogin">{{ t('auth.login') }}</button>
+                  <a class="auth-switch" @click="authMode = 'register'; loginError = ''">{{ t('auth.goRegister') }}</a>
+                </template>
+                <template v-else>
+                  <button class="primary-btn" :disabled="loginLoading || !loginPasswordConfirm" @click="doRegister">{{ t('auth.register') }}</button>
+                  <a class="auth-switch" @click="authMode = 'login'; loginError = ''">{{ t('auth.goLogin') }}</a>
+                </template>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 更多弹窗：固定定位，两个选项「查看更多」「订阅」 -->
+      <!-- Telegram 绑定弹窗（登录后使用） -->
+      <div v-if="showTgBindModal" class="modal-overlay">
+        <div class="modal-content glass-card animated-modal" @click.stop>
+          <div class="modal-header">
+            <h2>{{ t('auth.tgBindBtn') }}</h2>
+            <button class="close-btn" @click="showTgBindModal = false">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 1.5rem 0;">
+            <template v-if="bindTelegramId">
+              <p class="text-success" style="font-size: 0.9rem;">{{ t('auth.tgBound', { id: bindTelegramId }) }}</p>
+              <p class="tg-hint" style="margin-top: 0.5rem;">{{ t('auth.tgBindSuccess') }}</p>
+            </template>
+            <template v-else-if="showTgBindPanel">
+              <p class="tg-hint">{{ t('auth.tgBindHint') }}</p>
+              <a v-if="tgBindStartUrl" :href="tgBindStartUrl" target="_blank" rel="noopener" class="tg-link">{{ t('auth.openTelegram') }}</a>
+              <p class="tg-waiting">{{ t('auth.tgBindWaiting') }}</p>
+              <p v-if="tgBindError" class="text-danger" style="font-size: 0.85rem;">{{ tgBindError }}</p>
+            </template>
+            <template v-else>
+              <p class="tg-hint">{{ t('auth.tgBindHint') }}</p>
+              <button type="button" class="primary-btn tg-bind-btn" @click="startTgBind">{{ t('auth.tgBindBtn') }}</button>
+              <p v-if="tgBindError" class="text-danger" style="font-size: 0.85rem; margin-top: 0.5rem;">{{ tgBindError }}</p>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 我的订阅弹窗 -->
+      <div v-if="showMySubsModal" class="modal-overlay">
+        <div class="modal-content glass-card animated-modal" @click.stop>
+          <div class="modal-header">
+            <h2>{{ t('subscribe.mySubs') }}</h2>
+            <button class="close-btn" @click="showMySubsModal = false">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 1.5rem 0;">
+            <template v-if="!user">
+              <p class="text-center" style="color: var(--text-muted);">{{ t('subscribe.pleaseLogin') }}</p>
+              <button class="primary-btn" style="width: 100%; margin-top: 1rem;" @click="showMySubsModal = false; showLoginModal = true">{{ t('user.login') }}</button>
+            </template>
+            <template v-else-if="mySubsLoading">
+              <div class="text-center" style="padding: 2rem;"><div class="spinner">{{ t('loading') }}</div></div>
+            </template>
+            <template v-else-if="mySubscriptions.size === 0">
+              <p class="text-center" style="color: var(--text-muted);">{{ t('subscribe.empty') }}</p>
+            </template>
+            <template v-else>
+              <div class="my-subs-list">
+                <div v-for="k in [...mySubscriptions].sort()" :key="k" class="my-subs-item">
+                  <span>{{ k.replace('|', ' ') }}</span>
+                  <button type="button" class="unsub-btn" @click="doUnsubscribe(...k.split('|'))">{{ t('subscribe.unsubscribe') }}</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Subscribe Modal（已登录时显示 symbol 并提交，仅 ESC 或 X 关闭） -->
+      <div v-if="showSubscribeModal" class="modal-overlay">
+        <div class="modal-content glass-card animated-modal" @click.stop>
+          <div class="modal-header">
+            <h2>{{ t('table.subscribe') }}</h2>
+            <button class="close-btn close-btn-red" @click="showSubscribeModal = false">&times;</button>
+          </div>
+          <div class="modal-body" style="padding: 2rem 0;">
+            <template v-if="!user">
+              <p class="text-center" style="color: var(--text-muted);">{{ t('subscribe.pleaseLogin') }}</p>
+              <button class="primary-btn" style="width: 100%; margin-top: 1rem;" @click="showSubscribeModal = false; openLoginModal('login')">{{ t('user.login') }}</button>
+            </template>
+            <template v-else>
+              <div class="subscribe-form">
+                <div class="subscribe-form-center">
+                  <div class="subscribe-symbol-display">
+                    <span class="subscribe-symbol-text font-mono">{{ subscribeSymbol || '–' }}</span>
+                  </div>
+                  <div class="input-group">
+                    <label>{{ t('table.cycle') }}</label>
+                    <div class="cycle-badges">
+                      <button
+                        v-for="c in subscribeCycleOptions"
+                        :key="c"
+                        type="button"
+                        class="cycle-badge"
+                        :class="{ selected: subscribeCycles.includes(c) }"
+                        @click="toggleSubscribeCycle(c)"
+                      >
+                        <span class="cycle-badge-text">{{ c }}</span>
+                        <span v-if="subscribeCycles.includes(c)" class="cycle-badge-check">✓</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <p v-if="subscribeError" class="text-danger subscribe-msg">{{ subscribeError }}</p>
+                <p v-if="subscribeSuccess" class="text-success subscribe-msg">{{ t('subscribe.success') }}</p>
+                <div class="subscribe-form-footer">
+                  <button class="primary-btn" :disabled="subscribeLoading || !subscribeSymbol.trim() || !hasSubscribeChanges" @click="doSubscribeSubmit">
+                    {{ subscribeLoading ? t('loading') : t('subscribe.save') }}
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 更多弹窗：固定定位，「查看更多」「订阅/取消订阅」 -->
       <template v-if="moreMenuOpen !== null && moreMenuRow">
         <div class="more-overlay" @click="moreMenuOpen = null; moreMenuRow = null" />
         <div
@@ -726,8 +1240,8 @@ function openMoreMenu(row, ev) {
           <button type="button" class="more-popup-item" @click="openSMCModal(moreMenuRow); moreMenuOpen = null; moreMenuRow = null">
             {{ t('table.viewMore') }}
           </button>
-          <button type="button" class="more-popup-item" @click="handleSubscribe()">
-            {{ t('table.subscribe') }}
+          <button type="button" class="more-popup-item" @click.prevent.stop="handleSubscribe(moreMenuRow)">
+            {{ isSubscribed(moreMenuRow?.symbol, moreMenuRow?.cycle) ? t('subscribe.unsubscribe') : t('table.subscribe') }}
           </button>
         </div>
       </template>
@@ -761,11 +1275,17 @@ function openMoreMenu(row, ev) {
   width: auto;
 }
 
-.lang-toggle {
+.header-right {
   position: absolute;
   right: 1rem;
   top: 50%;
   transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.lang-toggle {
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid var(--glass-border);
   color: white;
@@ -781,6 +1301,249 @@ function openMoreMenu(row, ev) {
   border-color: var(--primary);
 }
 
+.user-info-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.user-email,
+.user-guest {
+  color: var(--text-muted);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-logout,
+.user-login-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--glass-border);
+  color: white;
+  padding: 0.35rem 0.75rem;
+  border-radius: 1.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+
+.user-logout:hover,
+.user-login-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: var(--primary);
+}
+
+.auth-form .input-group {
+  margin-bottom: 1rem;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.auth-actions {
+  flex-wrap: wrap;
+}
+
+.auth-actions .primary-btn {
+  flex: 1;
+  min-width: 120px;
+}
+
+.auth-switch {
+  font-size: 0.85rem;
+  color: var(--primary);
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 0.5rem;
+}
+
+.auth-switch:hover {
+  text-decoration: underline;
+}
+
+.auth-tg-bind {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--glass-border);
+}
+
+.tg-hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem;
+}
+
+.tg-link {
+  display: inline-block;
+  color: var(--primary);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  text-decoration: none;
+}
+
+.tg-link:hover {
+  text-decoration: underline;
+}
+
+.tg-waiting {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.tg-bind-btn {
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.tg-bind-btn:hover {
+  background: rgba(59, 130, 246, 0.3);
+}
+
+.subscribe-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.subscribe-form-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.subscribe-form .input-group {
+  margin-bottom: 1rem;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.subscribe-form .input-group label {
+  margin-bottom: 0.5rem;
+}
+
+.subscribe-symbol-display {
+  text-align: center;
+  margin-bottom: 1.25rem;
+}
+
+.subscribe-msg {
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  width: 100%;
+  text-align: center;
+}
+
+.subscribe-form-footer {
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+}
+
+.subscribe-symbol-text {
+  display: inline-block;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-main);
+  padding: 0.5rem 1rem;
+  background: rgba(59, 130, 246, 0.15);
+  border-radius: 0.5rem;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.cycle-badges {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  justify-content: center;
+}
+
+.cycle-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 56px;
+  min-width: 56px;
+  height: 44px;
+  padding: 0;
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.2s, border-color 0.2s, color 0.2s, transform 0.15s;
+  /* 未选中：与表格周期 badge-blue 一致 */
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+
+.cycle-badge:hover {
+  background: rgba(59, 130, 246, 0.35);
+  transform: translateY(-1px);
+}
+
+.cycle-badge.selected {
+  background: rgba(16, 185, 129, 0.3);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.cycle-badge.selected:hover {
+  background: rgba(16, 185, 129, 0.4);
+}
+
+.cycle-badge-check {
+  font-size: 0.9rem;
+  opacity: 0.95;
+}
+
+.my-subs-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.my-subs-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.my-subs-item:last-child {
+  border-bottom: none;
+}
+
+.unsub-btn {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.unsub-btn:hover {
+  background: rgba(239, 68, 68, 0.3);
+}
+
 .btn-group {
   display: flex;
   gap: 0.5rem;
@@ -789,6 +1552,91 @@ function openMoreMenu(row, ev) {
 
 .reset-btn {
   background: #475569 !important;
+}
+
+/* RSI 下拉打开时，filter-section 置于主体之上，避免被遮挡 */
+.filter-section.dropdown-open {
+  position: relative;
+  z-index: 1000;
+}
+
+/* RSI 选择器：与周期 select 同风格，上下滚动 */
+.rsi-select-group {
+  position: relative;
+}
+
+.rsi-selector {
+  position: relative;
+}
+
+.rsi-trigger {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--glass-border);
+  border-radius: 0.5rem;
+  padding: 0.6rem 1rem;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: border-color 0.2s;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.rsi-trigger:hover {
+  border-color: var(--primary);
+}
+
+.rsi-placeholder {
+  color: var(--text-muted);
+}
+
+.rsi-dropdown-wrap {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid var(--glass-border);
+  border-radius: 0.5rem;
+  z-index: 9999;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.rsi-dropdown {
+  height: 180px; /* 5 项 × 36px，滚动时显示 5 个范围内的值 */
+  overflow-y: auto;
+  scrollbar-width: none; /* Firefox 隐藏滚动条 */
+  -ms-overflow-style: none; /* IE/Edge 隐藏滚动条 */
+  /* 中间向两边渐变：顶部和底部透明，中间清晰 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+}
+
+.rsi-dropdown::-webkit-scrollbar {
+  display: none; /* Chrome/Safari 隐藏滚动条 */
+}
+
+.rsi-option {
+  height: 36px;
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.rsi-option:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.rsi-option.active {
+  background: rgba(59, 130, 246, 0.3);
+  color: var(--primary);
 }
 
 .stats-row {
@@ -1350,6 +2198,17 @@ function openMoreMenu(row, ev) {
   font-size: 2rem;
   cursor: pointer;
   line-height: 1;
+}
+
+.close-btn-red {
+  background: rgba(239, 68, 68, 0.25);
+  color: #f87171;
+  border-radius: 0.35rem;
+  padding: 0.2rem 0.5rem;
+}
+
+.close-btn-red:hover {
+  background: rgba(239, 68, 68, 0.4);
 }
 
 .animated-modal {
