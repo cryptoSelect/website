@@ -1,5 +1,5 @@
 # ========== 构建阶段 ==========
-FROM node:22-alpine AS builder
+FROM docker.mirrors.aliyun.com/library/node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # ========== 运行阶段：Nginx 托管静态文件 ==========
-FROM nginx:1.27-alpine
+FROM docker.mirrors.aliyun.com/library/nginx:1.27-alpine
 
 # 使用项目内的 nginx 配置（SPA 路由、静态缓存等）
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
