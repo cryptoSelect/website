@@ -20,13 +20,9 @@ COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 # 将构建产物放入 nginx 默认站点目录
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# 非 root 无法绑定 80，nginx 配置中已改为 listen 8080
-RUN chown -R nginx:nginx /usr/share/nginx/html \
-    && mkdir -p /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp \
-    && chown -R nginx:nginx /var/cache/nginx
+RUN chown -R nginx:nginx /usr/share/nginx/html
 
 EXPOSE 8080
 
-USER nginx
-
+# 以 root 运行 master 进程（可写 pid/cache），worker 由 nginx.conf 的 user 指定
 CMD ["nginx", "-g", "daemon off;"]
