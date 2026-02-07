@@ -475,10 +475,27 @@ onUnmounted(() => {
   stopTgBindPolling()
 })
 
+const copyFeedback = ref('')
+let copyFeedbackTimer = null
 const copyToClipboard = async (text) => {
+  const str = String(text ?? '').trim()
+  if (!str) return
   try {
-    await navigator.clipboard.writeText(text)
-    // Optional: add a tiny toast or transient state here
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(str)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = str
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    copyFeedback.value = str
+    if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+    copyFeedbackTimer = setTimeout(() => { copyFeedback.value = '' }, 1500)
   } catch (err) {
     console.error('Failed to copy: ', err)
   }
@@ -923,7 +940,7 @@ function openMoreMenu(row, ev) {
                       <a :href="`https://www.coinglass.com/tv/zh/Binance_${s.symbol}`" target="_blank" class="symbol-link">
                         <span class="symbol-name">{{ s.symbol }}</span>
                       </a>
-                      <button class="copy-btn" @click="copyToClipboard(s.symbol)" title="Copy symbol">
+                      <button type="button" class="copy-btn" @click.stop="copyToClipboard(s.symbol)" :title="t('table.copySymbol')">
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                       </button>
                     </div>
@@ -1245,6 +1262,13 @@ function openMoreMenu(row, ev) {
           </button>
         </div>
       </template>
+    </teleport>
+
+    <!-- 复制成功提示 -->
+    <teleport to="body">
+      <div v-if="copyFeedback" class="copy-toast">
+        {{ t('table.copySuccess') }}: <span class="font-mono">{{ copyFeedback }}</span>
+      </div>
     </teleport>
   </div>
 </template>
@@ -1808,6 +1832,26 @@ function openMoreMenu(row, ev) {
 
 .copy-btn:active {
   transform: scale(0.9);
+}
+
+.copy-toast {
+  position: fixed;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.6rem 1.2rem;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 10000;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 .font-mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
